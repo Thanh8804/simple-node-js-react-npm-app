@@ -1,5 +1,10 @@
-# Use an official Node.js image as the base image
 FROM node:18
+
+# Create a non-root user and group
+RUN addgroup --system appgroup && adduser --system appuser --ingroup appgroup
+
+# Switch to the non-root user
+USER appuser
 
 # Set the working directory inside the container
 WORKDIR /app
