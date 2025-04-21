@@ -1,10 +1,10 @@
 FROM node:18
 
-# Create a non-root user and group
-RUN addgroup --system appgroup && adduser --system appuser --ingroup appgroup
+# # Create a non-root user and group
+# RUN addgroup --system appgroup && adduser --system appuser --ingroup appgroup
 
-# Switch to the non-root user
-USER appuser
+# # Switch to the non-root user
+# USER appuser
 
 # Set the working directory inside the container
 WORKDIR /app
