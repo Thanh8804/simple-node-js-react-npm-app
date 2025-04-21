@@ -11,7 +11,8 @@ COPY package.json .
 RUN npm install
 
 # Copy the rest of the application code to the working directory
-COPY . .
+COPY src ./src
+COPY public ./public
 
 # Expose the port the app runs on (default for many Node.js apps is 3000)
 EXPOSE 3000
