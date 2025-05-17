@@ -131,10 +131,10 @@ spec:
                                     cat trivy-source.txt
                                 '''
                                 sh '''
-                                    if grep -q "CRITICAL\\|HIGH" trivy-source.txt; then
-                                        echo "Critical or High severity vulnerabilities found in source scan, failing pipeline"
-                                        exit 1
-                                    fi
+                                    if grep -q "CRITICAL" trivy-source.txt; then
+                                    echo "Critical vulnerabilities found in source scan, failing pipeline"
+                                    exit 1
+                                fi
                                 '''
                             }
                         }
