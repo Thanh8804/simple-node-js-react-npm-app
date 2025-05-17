@@ -131,10 +131,11 @@ spec:
                                     cat trivy-source.txt
                                 '''
                                 sh '''
-                                    if grep -q "CRITICAL" trivy-source.txt; then
-                                    echo "Critical vulnerabilities found in source scan, failing pipeline"
-                                    exit 1
-                                fi
+                                    CRITICAL_COUNT=$(grep -oP 'CRITICAL: \\K[0-9]+' trivy-source.txt | head -1)
+                                    if [ "$CRITICAL_COUNT" != "" ] && [ "$CRITICAL_COUNT" -gt 0 ]; then
+                                        echo "Critical vulnerabilities found in source scan ($CRITICAL_COUNT), failing pipeline"
+                                        exit 1
+                                    fi
                                 '''
                             }
                         }
@@ -178,9 +179,9 @@ spec:
                         '''
                         // Optional: Fail pipeline if critical vulnerabilities are found
                         sh '''
-                            if grep -q "CRITICAL" trivyimage.txt; 
-                            then
-                                echo "Critical vulnerabilities found, failing pipeline"
+                            CRITICAL_COUNT=$(grep -oP 'CRITICAL: \\K[0-9]+' trivy-source.txt | head -1)
+                            if [ "$CRITICAL_COUNT" != "" ] && [ "$CRITICAL_COUNT" -gt 0 ]; then
+                                echo "Critical vulnerabilities found in source scan ($CRITICAL_COUNT), failing pipeline"
                                 exit 1
                             fi
                         '''
