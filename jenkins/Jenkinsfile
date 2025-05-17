@@ -1,39 +1,346 @@
 pipeline {
     agent {
         kubernetes {
-        yaml '''
-            apiVersion: v1
-            kind: Pod
-            spec:
-            containers:
-            - name: node
-                image: node:18
-                command:
-                - cat
-                tty: true
-            '''
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: node
+    image: node:18-alpine
+    command:
+    - sleep
+    args:
+    - infinity
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:debug
+    command:
+    - sleep
+    args:
+    - 9999999
+    volumeMounts:
+    - name: docker-config
+      mountPath: /kaniko/.docker
+  - name: trivy 
+    image: aquasec/trivy:0.62.1
+    command: 
+    - sleep
+    args:
+    - 9999999
+  volumes:
+  - name: docker-config
+    projected:
+      sources:
+      - secret:
+          name: docker-credentials
+          items:
+          - key: .dockerconfigjson
+            path: config.json
+'''
         }
     }
     environment {
         CI = 'true'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        PIPELINE_NAME = "${env.JOB_NAME}" 
     }
     stages {
+        stage('Check npm') {
+            steps {
+                container('node') {
+                    sh 'npm version'
+                }
+            }
+        }
+        stage('Install jdk') {
+            steps {
+                container('node') {
+                    sh '''
+                        apk add --no-cache openjdk17
+                        export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+                        export PATH=$JAVA_HOME/bin:$PATH
+                        java -version
+                    '''
+                }
+            }
+        }
+        stage('Setup Git') {
+            steps {
+                container('node') {
+                    sh 'apk add --no-cache git'
+                }
+            }
+        }
+        stage('Checkout') {
+            steps {
+                container('node') {
+                    checkout scmGit(
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'https://github.com/Thanh8804/simple-node-js-react-npm-app.git',
+                            credentialsId: 'github-token'
+                        ]]
+                    )
+                }
+            }
+        }
         stage('Build') {
             steps {
-                sh 'npm install'
+                container('node') {
+                    sh 'npm ci'
+                }
             }
         }
-        stage('Test') {
-            steps {
-                sh './jenkins/scripts/test.sh'
+        stage('Test and SonarQube Scan')
+        {
+            parallel {
+                stage('Basic Test') {
+                    steps {
+                        container('node') {
+                            sh 'npm test -- --coverage'
+                        }
+                    }
+                }
+                stage('SonarQube Scan') {
+                    environment {
+                        SONAR_AUTH_TOKEN = credentials('sonarqube-token');
+                        SCANNER_HOME = tool 'sonarqube';   
+                    }
+                    steps {
+                        container('node') {
+                            withSonarQubeEnv(installationName: 'sonarqube') {
+                                sh '''
+                                    $SCANNER_HOME/bin/sonar-scanner \
+                                    -Dsonar.projectKey=js-project \
+                                    -Dsonar.host.url=http://34.53.70.78:31000/ \
+                                    -Dsonar.login=$SONAR_AUTH_TOKEN
+                                '''
+        
+                            }
+                        }
+                    }
+                }
+                stage('Trivy Source Scan') {
+                    steps {
+                        container('trivy') {
+                            script {
+                                sh '''
+                                    trivy fs --no-progress --severity MEDIUM,HIGH,CRITICAL \
+                                    --scanners vuln,secret \
+                                    --format table . > trivy-source.txt 2>&1
+                                    cat trivy-source.txt
+                                '''
+                                sh '''
+                                    if grep -q "CRITICAL\\|HIGH" trivy-source.txt; then
+                                        echo "Critical or High severity vulnerabilities found in source scan, failing pipeline"
+                                        exit 1
+                                    fi
+                                '''
+                            }
+                        }
+                    }
+                }
             }
         }
-        stage('Deliver') {
+        stage('Quality Gate') {
             steps {
-                sh './jenkins/scripts/deliver.sh'
-                input message: 'Finished using the web site? (Click "Proceed" to continue)'
-                sh './jenkins/scripts/kill.sh'
+                container('node') {
+                    timeout(activity: true, time: 2, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true, credentialsId: 'sonarqube-token'
+                    }
+                }
             }
+        }
+        stage('Build and Push Docker Image') {
+            steps {
+                container(name: 'kaniko', shell: '/busybox/sh') {
+                    sh '''#!/busybox/sh
+                        /kaniko/executor \
+                          --context `pwd` \
+                          --destination thanh8804/react-app:$IMAGE_TAG \
+                          --cache=true
+                          --log-format=text > kaniko-build.log 2>&1
+                         cat kaniko-build.log
+                    '''
+                }
+            }
+        }
+        stage('Trivy'){
+            steps {
+              container('trivy'){
+                  script { // Thêm script block nếu muốn dùng biến Groovy
+                        sh '''
+                        trivy image --no-progress --severity MEDIUM,HIGH,CRITICAL \
+                                    --scanners vuln,secret \
+                                    --skip-files ".npm/_cacache" \
+                                    --timeout 10m thanh8804/react-app:$IMAGE_TAG > trivyimage.txt 2>&1
+                                    cat trivyimage.txt
+                        '''
+                        // Optional: Fail pipeline if critical vulnerabilities are found
+                        sh '''
+                            if grep -q "CRITICAL" trivyimage.txt; 
+                            then
+                                echo "Critical vulnerabilities found, failing pipeline"
+                                exit 1
+                            fi
+                        '''
+                    }
+                 }
+              }
+            }
+        stage('Update Dev Manifests') {
+            steps {
+                container('node') {
+                    withCredentials([string(credentialsId: 'githubtoken', variable: 'GIT_TOKEN')]) {
+                        retry(3){
+                            sh '''
+                                git clone https://github.com/Thanh8804/simple-node-react-k8s-manifests.git
+                                cd simple-node-react-k8s-manifests/k8s-manifests
+                                sed -i "s/newTag:.*/newTag: \\"${BUILD_NUMBER}\\"/g" overlays/dev/kustomization.yaml
+                                git config user.email "chithanh080804@gmail.com"
+                                git config user.name "Thanh8804@"
+                                git add overlays/dev/kustomization.yaml
+                                git commit -m "Update dev image to thanh8804/react-app:${BUILD_NUMBER}" || echo "No changes to commit"
+                                git push https://$GIT_TOKEN@github.com/Thanh8804/simple-node-react-k8s-manifests.git HEAD:main
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        stage('Trigger ArgoCD Sync DEV') {
+            steps {
+                container('node') {
+                    withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+                        sh '''
+                            apk add --no-cache curl
+                            curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+                            install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+                            rm argocd-linux-amd64
+                            argocd login argocd-server.argocd.svc.cluster.local:443 --username admin --password $ARGOCD_TOKEN --insecure
+                            argocd app sync react-development
+                         '''
+                     }
+                 }
+             }
+        }
+        stage('Update Prod Manifest') {
+            when {
+                expression { currentBuild.currentResult == 'SUCCESS' }
+            }
+            steps {
+                container('node') {
+                    withCredentials([string(credentialsId: 'githubtoken', variable: 'GIT_TOKEN')]) {
+                        retry(3){
+                            sh '''
+                                cd simple-node-react-k8s-manifests/k8s-manifests
+                                sed -i "s/newTag:.*/newTag: \\"${BUILD_NUMBER}\\"/g" overlays/prod/kustomization.yaml
+                                git config user.email "chithanh080804@gmail.com"
+                                git config user.name "Thanh8804@"
+                                git add overlays/prod/kustomization.yaml
+                                git commit -m "Update prod image to thanh8804/react-app:${BUILD_NUMBER}" || echo "No changes to commit"
+                                git push https://$GIT_TOKEN@github.com/Thanh8804/simple-node-react-k8s-manifests.git HEAD:main
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        stage('Trigger ArgoCD Sync PROD') {
+            when{
+                 expression { currentBuild.currentResult == 'SUCCESS' }
+            }
+            steps {
+                container('node') {
+                    withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            retry(3) {
+                                sh '''
+                                    argocd app sync react-production --timeout 300 > argocd-sync-prod.log 2>&1
+                                    cat argocd-sync-prod.log
+                                '''
+                            }
+                        }
+                     }
+                 }
+             }
+        }
+    }
+    post {
+        always {
+            echo "Pipeline '${PIPELINE_NAME}' completed."
+            container('node') {
+                sh '''
+                    rm -f trivyimage.txt kaniko-build.log argocd-sync-dev.log argocd-sync-prod.log
+                    rm -rf simple-node-react-k8s-manifests
+                '''
+            }
+        }
+        success {
+            emailext attachLog: true, 
+                     body: "The pipeline '${PIPELINE_NAME} Build #${BUILD_NUMBER}' has completed successfully.", 
+                     subject: "Pipeline Success: ${PIPELINE_NAME} - Build #${BUILD_NUMBER}", 
+                     to: 'chithanh080804@gmail.com'
+        }
+        failure {
+            emailext attachLog: true, 
+                     body: "The pipeline '${PIPELINE_NAME}' has failed. Please review the attached logs.", 
+                     subject: "Pipeline Failed: ${PIPELINE_NAME} - Build #${BUILD_NUMBER}", 
+                     to: 'chithanh080804@gmail.com'
         }
     }
 }
+// agent {
+//         kubernetes {
+//             yaml '''
+// apiVersion: v1
+// kind: Pod
+// spec:
+//   containers:
+//   - name: node
+//     image: node:18-alpine
+//     command:
+//     - sleep
+//     args:
+//     - infinity
+//   - name: kaniko
+//     image: gcr.io/kaniko-project/executor:debug
+//     command:
+//     - sleep
+//     args:
+//     - 9999999
+//     volumeMounts:
+//     - name: docker-config
+//       mountPath: /kaniko/.docker
+//     resources:
+//       requests:
+//         cpu: "500m"
+//         memory: "768Mi"
+//       limits:
+//         cpu: "600m"
+//         memory: "1024Mi"
+//   - name: trivy 
+//     image: aquasec/trivy:0.62.1
+//     command: 
+//     - sleep
+//     args:
+//     - 9999999
+//     resources:
+//         requests:
+//         cpu: "300m"
+//         memory: "800Mi"
+//     limits:
+//         cpu: "500m"
+//         memory: "1024Mi"
+//   volumes:
+//   - name: docker-config
+//     projected:
+//       sources:
+//       - secret:
+//           name: docker-credentials
+//           items:
+//           - key: .dockerconfigjson
+//             path: config.json
+// '''
+//         }
+//     }

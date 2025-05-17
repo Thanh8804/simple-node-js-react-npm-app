@@ -1,0 +1,52 @@
+# Node.js specific
+node_modules
+npm-debug.log
+yarn-error.log
+.npm
+.cache
+npm_cache
+
+# Sensitive files and directories
+*.pem
+*.key
+*.crt
+*.csr
+*.cert
+*.pfx
+*.srl
+*.spl
+secrets
+credentials
+.env
+*.env
+*.secret
+
+# Build and test artifacts
+coverage
+dist
+build
+tmp
+temp
+
+# Git and CI files
+.git
+.gitignore
+.github
+.jenkins
+.gitlab-ci.yml
+.circleci
+.travis.yml
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.bak
+*.tmp
+*.log
+
+# Docker-specific
+Dockerfile
+docker-compose*
+.dockerignore

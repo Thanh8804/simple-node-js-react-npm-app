@@ -11,14 +11,14 @@ RUN mkdir -p /home/appuser /app && \
 WORKDIR /app
 
 # Copy package.json
-COPY package.json ./
+COPY package*.json ./
 RUN chown -R appuser:appgroup /app
 
 # Chuyển sang user không phải root
 USER appuser
 
 # Cài dependencies
-RUN npm install
+RUN npm install && npm cache clean --force
 
 # Copy source code
 COPY --chown=appuser:appgroup src ./src
